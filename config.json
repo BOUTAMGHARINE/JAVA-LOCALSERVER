@@ -1,0 +1,23 @@
+{
+  "servers": [
+    {
+      "host": "localhost",
+      "ports": [8080, 8081],
+      "error_pages": {
+        "404": "error_pages/404.html",
+        "500": "error_pages/500.html"
+      },
+      "routes": {
+        "/": {
+          "root": "www",
+          "index": "index.html",
+          "methods": ["GET"]
+        },
+        "/uploads": {
+          "root": "www/uploads",
+          "methods": ["GET", "POST", "DELETE"]
+        }
+      }
+    }
+  ]
+}

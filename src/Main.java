@@ -1,12 +1,8 @@
 public class Main {
     public static void main(String[] args) {
-        // On définit le port d'écoute
-        int port = 8080;
-        
-        // On crée notre objet Server
-        Server server = new Server(port);
-        
-        // On démarre le serveur
+        // Charge la configuration via ConfigLoader
+        ConfigLoader.ServerConfig config = ConfigLoader.loadConfig("config.json");
+        Server server = new Server(config);
         server.start();
     }
 }
