@@ -13,11 +13,11 @@ import java.util.Map;
 import java.util.Set;
 
 public class Server {
-    private final List<Integer> ports; // On gère maintenant une LISTE de ports
+
+    private final List<Integer> ports;
     private Selector selector;
     private final ConfigLoader.ServerConfig config;
 
-    // Le constructeur reçoit maintenant la config chargée (via ConfigLoader)
     public Server(ConfigLoader.ServerConfig config) {
         this.config = config;
         this.ports = config.ports;
@@ -25,18 +25,13 @@ public class Server {
 
     public void start() {
         try {
-            // 1. Un seul Selector pour tout le monde
             this.selector = Selector.open();
-            
-            // 2. On ouvre une porte d'entrée (ServerSocketChannel) pour CHAQUE port
+
             for (int port : ports) {
                 ServerSocketChannel serverChannel = ServerSocketChannel.open();
                 serverChannel.bind(new InetSocketAddress("localhost", port));
-                serverChannel.configureBlocking(false); // Non-bloquant obligatoire
-                
-                // On enregistre chaque canal sur le MÊME selector
+                serverChannel.configureBlocking(false);
                 serverChannel.register(this.selector, SelectionKey.OP_ACCEPT);
-                
                 System.out.println("[INIT] Écoute initialisée sur le port : " + port);
             }
 
@@ -44,23 +39,19 @@ public class Server {
             System.out.println("En attente d'événements sur " + ports.size() + " port(s)...");
             System.out.println("==========================================");
 
-            // 3. La Boucle Événementielle reste EXACTEMENT la même !
             while (true) {
-                this.selector.select(); 
-
+                this.selector.select();
                 Set<SelectionKey> selectedKeys = this.selector.selectedKeys();
-                System.out.println("[INFO] " + selectedKeys + " événement(s) à traiter...-----------------------------------");
                 Iterator<SelectionKey> iterator = selectedKeys.iterator();
 
                 while (iterator.hasNext()) {
                     SelectionKey key = iterator.next();
-                    iterator.remove(); 
+                    iterator.remove();
 
                     if (!key.isValid()) continue;
 
                     try {
                         if (key.isAcceptable()) {
-                            // On doit récupérer le bon ServerSocketChannel qui a déclenché l'événement
                             ServerSocketChannel serverChannel = (ServerSocketChannel) key.channel();
                             handleAccept(serverChannel);
                         } else if (key.isReadable()) {
@@ -73,30 +64,25 @@ public class Server {
                     }
                 }
             }
-
         } catch (IOException e) {
             System.err.println("Erreur fatale du serveur : " + e.getMessage());
         }
     }
 
-    // handleAccept prend maintenant le canal spécifique en paramètre
     private void handleAccept(ServerSocketChannel serverChannel) throws IOException {
         SocketChannel clientChannel = serverChannel.accept();
         clientChannel.configureBlocking(false);
         clientChannel.register(this.selector, SelectionKey.OP_READ);
-        
-        // Petite info utile : on affiche sur quel port local le client est arrivé
-        System.out.println("[CONNEXION] Client connecté sur le port " 
-                + serverChannel.socket().getLocalPort() 
+        System.out.println("[CONNEXION] Client connecté sur le port "
+                + serverChannel.socket().getLocalPort()
                 + " depuis : " + clientChannel.getRemoteAddress());
     }
 
     private void handleRead(SelectionKey key) throws IOException {
         SocketChannel clientChannel = (SocketChannel) key.channel();
         ByteBuffer buffer = ByteBuffer.allocate(2048);
-        
+
         int bytesRead = clientChannel.read(buffer);
-        
         if (bytesRead == -1) {
             clientChannel.close();
             key.cancel();
@@ -106,33 +92,42 @@ public class Server {
         buffer.flip();
         String requestText = StandardCharsets.UTF_8.decode(buffer).toString();
 
-        if (requestText.trim().isEmpty()) {
+        if (requestText.trim().isEmpty()) {  
             clientChannel.close();
             key.cancel();
             return;
         }
 
-        // Séparer en headers et body si présent
         String[] parts = requestText.split("\r?\n\r?\n", 2);
         String headerPart = parts[0];
         String bodyPart = parts.length > 1 ? parts[1] : "";
 
         String[] headerLines = headerPart.split("\r?\n");
+        if (headerLines.length == 0 || headerLines[0].trim().isEmpty()) {
+            sendErrorPage(clientChannel, "400", "HTTP/1.1 400 Bad Request");
+            key.cancel();
+            return;
+        }
+
         String requestLine = headerLines[0];
         System.out.println("[REQUÊTE] " + requestLine);
 
         String[] reqTokens = requestLine.split(" ");
-        String method = reqTokens.length > 0 ? reqTokens[0] : "";
-        String path = reqTokens.length > 1 ? reqTokens[1] : "/";
+        if (reqTokens.length < 2) {
+            sendErrorPage(clientChannel, "400", "HTTP/1.1 400 Bad Request");
+            key.cancel();
+            return;
+        }
+
+        String method = reqTokens[0];
+        String path = reqTokens[1];
 
         Map<String, String> headers = new HashMap<>();
         for (int i = 1; i < headerLines.length; i++) {
             String line = headerLines[i];
             int idx = line.indexOf(":");
             if (idx > 0) {
-                String name = line.substring(0, idx).trim();
-                String value = line.substring(idx + 1).trim();
-                headers.put(name.toLowerCase(), value);
+                headers.put(line.substring(0, idx).trim().toLowerCase(), line.substring(idx + 1).trim());
             }
         }
 
@@ -141,47 +136,51 @@ public class Server {
         String contentType = "text/html; charset=UTF-8";
 
         if ("POST".equalsIgnoreCase(method)) {
-            // Echo du body pour l'instant
-            String bodyPreview = bodyPart;
-            // Si Content-Length indique plus de données, on ne gère pas la lecture incrémentale ici
-            String html = "<html><body><h1>POST reçu</h1><pre>" + escapeHtml(bodyPreview) + "</pre></body></html>";
+            // TODO: Vérifier ici la taille (Content-Length) pour la 413 plus tard
+            String html = "<html><body><h1>POST reçu</h1><pre>" + escapeHtml(bodyPart) + "</pre></body></html>";
             responseBodyBytes = html.getBytes(StandardCharsets.UTF_8);
         } else if ("GET".equalsIgnoreCase(method)) {
-            // Tentative de servir un fichier depuis le root configuré
             if (path.contains("..")) {
-                statusLine = "HTTP/1.1 403 Forbidden";
-                String html = "<html><body><h1>403 Forbidden</h1></body></html>";
-                responseBodyBytes = html.getBytes(StandardCharsets.UTF_8);
+                sendErrorPage(clientChannel, "403", "HTTP/1.1 403 Forbidden");
+                key.cancel();
+                return;
             } else {
                 String normalized = path.split("\\?")[0];
                 if (normalized.endsWith("/")) normalized += this.config.indexFile;
                 if (normalized.equals("/")) normalized = "/" + this.config.indexFile;
+
                 Path filePath = Paths.get(this.config.rootDir + normalized);
                 if (Files.exists(filePath) && Files.isRegularFile(filePath)) {
                     responseBodyBytes = Files.readAllBytes(filePath);
-                    // très basique: si fichier html
                     if (normalized.endsWith(".html") || normalized.endsWith(".htm")) {
                         contentType = "text/html; charset=UTF-8";
+                    } else if (normalized.endsWith(".css")) {
+                        contentType = "text/css";
+                    } else if (normalized.endsWith(".js")) {
+                        contentType = "application/javascript";
                     } else {
                         contentType = "application/octet-stream";
                     }
                 } else {
-                    statusLine = "HTTP/1.1 404 Not Found";
-                    String html = "<html><body><h1>404 Not Found</h1><p>" + escapeHtml(path) + "</p></body></html>";
-                    responseBodyBytes = html.getBytes(StandardCharsets.UTF_8);
+                    // Erreur 404 : Fichier introuvable
+                    sendErrorPage(clientChannel, "404", "HTTP/1.1 404 Not Found");
+                    key.cancel();
+                    return;
                 }
             }
         } else {
-            statusLine = "HTTP/1.1 405 Method Not Allowed";
-            String html = "<html><body><h1>405 Method Not Allowed</h1></body></html>";
-            responseBodyBytes = html.getBytes(StandardCharsets.UTF_8);
+            // Méthode inconnue ou non implémentée (ex: TRACE, OPTIONS)
+            sendErrorPage(clientChannel, "405", "HTTP/1.1 405 Method Not Allowed");
+            key.cancel();
+            return;
         }
 
-        String httpResponse = statusLine + "\r\n" +
-                              "Content-Type: " + contentType + "\r\n" +
-                              "Content-Length: " + responseBodyBytes.length + "\r\n" +
-                              "Connection: close\r\n" +
-                              "\r\n";
+        // Envoi de la réponse de succès (200 OK)
+        String httpResponse = statusLine + "\r\n"
+                + "Content-Type: " + contentType + "\r\n"
+                + "Content-Length: " + responseBodyBytes.length + "\r\n"
+                + "Connection: close\r\n"
+                + "\r\n";
 
         ByteBuffer responseBuffer = ByteBuffer.allocate(httpResponse.getBytes(StandardCharsets.UTF_8).length + responseBodyBytes.length);
         responseBuffer.put(httpResponse.getBytes(StandardCharsets.UTF_8));
@@ -194,6 +193,41 @@ public class Server {
 
         clientChannel.close();
         key.cancel();
+    }
+
+    /**
+     * Nouvelle méthode robuste qui cherche la page d'erreur sur le disque dur.
+     * Si le fichier HTML customisé n'existe pas, elle renvoie une structure de secours.
+     */
+    private void sendErrorPage(SocketChannel clientChannel, String errorCode, String statusLine) throws IOException {
+        byte[] bodyBytes;
+        
+        // On essaie de récupérer le chemin depuis le dossier "error_pages/"
+        Path errorPath = Paths.get("error_pages/" + errorCode + ".html");
+        
+        if (Files.exists(errorPath) && Files.isRegularFile(errorPath)) {
+            bodyBytes = Files.readAllBytes(errorPath);
+        } else {
+            // Fallback (Sécurité) au cas où le fichier HTML est supprimé ou introuvable
+            String fallbackHtml = "<html><body><h1>" + statusLine + "</h1><p>Erreur " + errorCode + "</p></body></html>";
+            bodyBytes = fallbackHtml.getBytes(StandardCharsets.UTF_8);
+        }
+
+        String httpResponse = statusLine + "\r\n"
+                + "Content-Type: text/html; charset=UTF-8\r\n"
+                + "Content-Length: " + bodyBytes.length + "\r\n"
+                + "Connection: close\r\n"
+                + "\r\n";
+
+        ByteBuffer responseBuffer = ByteBuffer.allocate(httpResponse.getBytes(StandardCharsets.UTF_8).length + bodyBytes.length);
+        responseBuffer.put(httpResponse.getBytes(StandardCharsets.UTF_8));
+        responseBuffer.put(bodyBytes);
+        responseBuffer.flip();
+
+        while (responseBuffer.hasRemaining()) {
+            clientChannel.write(responseBuffer);
+        }
+        clientChannel.close();
     }
 
     private static String escapeHtml(String s) {
